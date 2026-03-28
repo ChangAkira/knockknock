@@ -41,6 +41,7 @@ data class DetectionQualityMetrics(
     val stereoConsistency: Float,
     val peakSharpness: Float,
     val trailingPeakRatio: Float,
+    val peakBalanceRatio: Float,
     val gapScore: Float,
     val channelEnergyRatio: Float,
     val combinedPeakChannelRatio: Float,

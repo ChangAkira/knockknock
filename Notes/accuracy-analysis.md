@@ -498,3 +498,65 @@ TDoA:
 
 这几个数字基本就能解释为什么当前准确率还不够高。
 
+---
+
+## 13. 已完成改进与建议对比（2026-03 第一阶段）
+
+这部分记录“已经在代码中落地”的改进，并和第 8 节建议逐条对比。
+
+### 13.1 对比结论（先看结果）
+
+1. **8.1 增加标定样本：已完成第一步**  
+   每区域默认标定样本已从 `6` 提升到 `12`（配置项 `calibrationSamplesPerDirection`）。
+
+2. **8.2 多次敲击投票：已完成第一版**  
+   已从“单次命中即触发”改为“短窗口投票触发”（默认窗口 `3`，至少 `2` 票一致，且平均置信度达标）。
+
+3. **双击力度策略：已按新需求修改**  
+   由“第二下偏轻更理想”改为“允许一轻一重，不限制先后顺序”；也就是第一下轻第二下重、或第一下重第二下轻都可触发。
+
+4. **8.3 TDoA 稳定性增强：暂未做结构改造**  
+   暂未引入 48kHz、多频段 GCC、新加窗策略；保留在下一步。
+
+5. **8.4 个体化统计模型：暂未做**  
+   当前仍以 KNN 主流程为主，后续再升级马氏距离/协方差模型。
+
+### 13.2 代码层面的已改动点
+
+- `app/src/main/java/com/example/testppppp/audio/TapDetectionConfig.kt`
+  - `calibrationSamplesPerDirection: 6 -> 12`
+  - 新增投票参数：`votingWindowSize`、`votingMinAgreement`、`votingMinAverageConfidence`
+  - 新增双峰强弱平衡阈值：`minPeakBalanceRatio`
+
+- `app/src/main/java/com/example/testppppp/ui/TapDirectionViewModel.kt`
+  - 新增 `DetectionVoteAggregator`，将实时触发从单次改为多次投票确认
+  - 增加投票中的状态提示与日志，避免“看起来命中但未触发”的困惑
+
+- `app/src/main/java/com/example/testppppp/audio/detection/TapDetectionPipeline.kt`
+  - 新增 `peakBalanceRatio = min(peak1, peak2) / max(peak1, peak2)` 特征
+  - 新增失败条件：双峰强弱失衡时拒绝
+  - 质量分中对双峰关系的评分改为“强弱平衡可接受”导向，而非依赖“第二下偏轻”的单向偏置
+
+- `app/src/main/java/com/example/testppppp/audio/TapModels.kt`
+  - `DetectionQualityMetrics` 新增 `peakBalanceRatio`
+
+### 13.3 与第 8 节建议的对应关系
+
+| 建议项 | 原建议 | 当前状态 | 备注 |
+|---|---|---|---|
+| 8.1 | 每区 `6 -> 12~20` | **已落地到 12** | 先做低风险提升，后续可继续调到 `15/18/20` |
+| 8.2 | 连续多次投票 | **已落地（3 次窗）** | 默认 3 次窗口，2 票一致 + 平均置信度门槛 |
+| 8.3 | 48k / 多频段 GCC / 加窗 | **未落地** | 下一阶段优先做低风险 GCC 稳定性增强 |
+| 8.4 | 统计模型（马氏距离） | **未落地** | 需在样本进一步增多后推进 |
+
+### 13.4 下一步建议（紧接当前实现）
+
+1. 在同一设备、同一桌面下做一次 A/B 对比：  
+   - A：旧参数（6 样本 + 单次触发）  
+   - B：新参数（12 样本 + 3 次投票）  
+   重点看 `TOP/BOTTOM` 混淆是否下降。
+
+2. 若 B 明显更稳，再把每区样本数从 `12` 提高到 `15` 或 `18`，并保持轻/中/重覆盖。
+
+3. 进入下一阶段时，优先做 8.3 的低风险版本（先多频段 GCC 与加窗，再评估是否上 48k）。
+

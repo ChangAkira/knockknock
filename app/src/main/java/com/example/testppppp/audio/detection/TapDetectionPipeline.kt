@@ -154,6 +154,7 @@ class TapDetectionPipeline(
             val first = peaks[index]
             val second = peaks[index + 1]
             val trailingPeakRatio = (second.amplitude / first.amplitude.coerceAtLeast(1e-6f))
+            val peakBalanceRatio = min(first.amplitude, second.amplitude) / max(first.amplitude, second.amplitude).coerceAtLeast(1e-6f)
             val intervalMs = second.timeMs - first.timeMs
             val pair = PeakPairInfo(
                 first = first,
@@ -201,6 +202,7 @@ class TapDetectionPipeline(
                 stereoConsistency = stereoConsistency,
                 peakSharpness = peakSharpness,
                 trailingPeakRatio = trailingPeakRatio,
+                peakBalanceRatio = peakBalanceRatio,
                 gapScore = gapScore,
                 channelEnergyRatio = channelEnergyRatio,
                 combinedPeakChannelRatio = combinedPeakChannelRatio,
@@ -214,6 +216,7 @@ class TapDetectionPipeline(
                     stereoConsistency = stereoConsistency,
                     peakSharpness = peakSharpness,
                     trailingPeakRatio = trailingPeakRatio,
+                    peakBalanceRatio = peakBalanceRatio,
                     gapScore = gapScore,
                 ),
             )
@@ -323,6 +326,9 @@ class TapDetectionPipeline(
         if (quality.trailingPeakRatio > config.maxTrailingPeakRatio) {
             reasons += "第二下过重，双峰不稳定"
         }
+        if (quality.peakBalanceRatio < config.minPeakBalanceRatio) {
+            reasons += "双峰强弱比例失衡，未形成稳定一轻一重"
+        }
         return reasons
     }
 
@@ -334,6 +340,7 @@ class TapDetectionPipeline(
         stereoConsistency: Float,
         peakSharpness: Float,
         trailingPeakRatio: Float,
+        peakBalanceRatio: Float,
         gapScore: Float,
     ): Double {
         val absolutePeakScore = (absolutePeak / 0.05f).coerceIn(0f, 1f)
@@ -343,7 +350,7 @@ class TapDetectionPipeline(
         val stereoScore = (stereoConsistency / 0.6f).coerceIn(0f, 1f)
         val sharpnessScore = ((peakSharpness - 0.9f) / (config.minPeakSharpness + 0.35f - 0.9f))
             .coerceIn(0f, 1f)
-        val trailingScore = trailingPeakScore(trailingPeakRatio)
+        val trailingScore = trailingPeakScore(trailingPeakRatio, peakBalanceRatio)
 
         return 100.0 * (
             0.15 * absolutePeakScore +
@@ -357,16 +364,12 @@ class TapDetectionPipeline(
             )
     }
 
-    private fun trailingPeakScore(trailingPeakRatio: Float): Float {
+    private fun trailingPeakScore(trailingPeakRatio: Float, peakBalanceRatio: Float): Float {
         if (trailingPeakRatio !in config.minTrailingPeakRatio..config.maxTrailingPeakRatio) {
             return 0f
         }
-        val maxDistance = max(
-            config.idealTrailingPeakRatio - config.minTrailingPeakRatio,
-            config.maxTrailingPeakRatio - config.idealTrailingPeakRatio,
-        ).coerceAtLeast(1e-6f)
-        return (1f - abs(trailingPeakRatio - config.idealTrailingPeakRatio) / maxDistance)
-            .coerceIn(0f, 1f)
+        val normalized = (peakBalanceRatio / config.minPeakBalanceRatio.coerceAtLeast(1e-6f)).coerceIn(0f, 1f)
+        return normalized
     }
 
     private fun gapScore(intervalMs: Float): Float {

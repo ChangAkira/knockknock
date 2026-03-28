@@ -25,7 +25,7 @@ data class TapDirectionUiState(
     val audioCaptureStatus: AudioCaptureStatus = AudioCaptureStatus.Idle,
     val latestDetection: LatestDetectionSummary? = null,
     val logs: List<DetectionLogEntry> = emptyList(),
-    val calibrationProgress: CalibrationProgress = CalibrationProgress.idle(targetSamplesPerDirection = 6),
+    val calibrationProgress: CalibrationProgress = CalibrationProgress.idle(targetSamplesPerDirection = 12),
     val hasStoredCalibration: Boolean = false,
     val statusMessage: String = "等待录音权限",
 )

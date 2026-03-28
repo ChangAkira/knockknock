@@ -26,6 +26,7 @@ data class TapDetectionConfig(
     val minTrailingPeakRatio: Float = 0.24f,
     val idealTrailingPeakRatio: Float = 0.62f,
     val maxTrailingPeakRatio: Float = 1.55f,
+    val minPeakBalanceRatio: Float = 0.30f,
     val idealGapMs: Float = 165f,
     val idealGapToleranceMs: Float = 190f,
     val minGapScore: Float = 0.45f,
@@ -36,11 +37,14 @@ data class TapDetectionConfig(
     val minPeakRatio: Double = 1.04,
     val lowLagConfidenceHint: Double = 0.08,
     val lagConfidenceMultiplier: Double = 3.2,
-    val calibrationSamplesPerDirection: Int = 6,
+    val calibrationSamplesPerDirection: Int = 12,
     val calibrationAcceptedQualityScore: Double = 56.0,
     val testingAcceptedQualityScore: Double = 52.0,
     val calibrationCooldownMs: Long = 900L,
     val testingCooldownMs: Long = 900L,
+    val votingWindowSize: Int = 3,
+    val votingMinAgreement: Int = 2,
+    val votingMinAverageConfidence: Double = 0.26,
     val maxLogEntries: Int = 120,
 ) {
     val windowSizeSamples: Int = sampleRateHz * windowMs / 1_000

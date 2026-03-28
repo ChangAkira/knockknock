@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.testppppp.audio.AudioCaptureStatus
 import com.example.testppppp.audio.CalibrationSample
+import com.example.testppppp.audio.ClassificationResult
+import com.example.testppppp.audio.SectorDirection
 import com.example.testppppp.audio.TapDetectionConfig
 import com.example.testppppp.audio.TapDetectionResult
 import com.example.testppppp.audio.calibration.CalibrationRepository
@@ -32,6 +34,11 @@ class TapDirectionViewModel(
     private val streamingDetector = StreamingTapDetector(config, pipeline)
     private val recorder = DualChannelAudioRecorder(config)
     private val calibrationSession = CalibrationSession(config.calibrationSamplesPerDirection)
+    private val voteAggregator = DetectionVoteAggregator(
+        windowSize = config.votingWindowSize,
+        minAgreement = config.votingMinAgreement,
+        minAverageConfidence = config.votingMinAverageConfidence,
+    )
     private val isProcessingFrame = AtomicBoolean(false)
     private var lastCalibrationAcceptedAtMs: Long = 0L
     private var lastTestingTriggeredAtMs: Long = 0L
@@ -68,6 +75,7 @@ class TapDirectionViewModel(
         }
 
         streamingDetector.reset()
+        voteAggregator.reset()
 
         recorder.start(
             scope = viewModelScope,
@@ -94,6 +102,7 @@ class TapDirectionViewModel(
         viewModelScope.launch {
             recorder.stop()
             streamingDetector.reset()
+            voteAggregator.reset()
             _uiState.update {
                 it.copy(
                     audioCaptureStatus = AudioCaptureStatus.Idle,
@@ -106,6 +115,7 @@ class TapDirectionViewModel(
     fun startCalibration() {
         calibrationSession.start()
         lastCalibrationAcceptedAtMs = 0L
+        voteAggregator.reset()
         _uiState.update {
             it.copy(
                 calibrationProgress = calibrationSession.progress(),
@@ -117,6 +127,7 @@ class TapDirectionViewModel(
 
     fun cancelCalibration() {
         calibrationSession.cancel()
+        voteAggregator.reset()
         _uiState.update {
             it.copy(
                 calibrationProgress = calibrationSession.progress(),
@@ -129,6 +140,7 @@ class TapDirectionViewModel(
     fun clearCalibration() {
         calibrationRepository.clear()
         classifier.updateCalibration(null)
+        voteAggregator.reset()
         _uiState.update {
             it.copy(
                 hasStoredCalibration = false,
@@ -217,12 +229,20 @@ class TapDirectionViewModel(
             }
         }
 
-        val effectiveTriggered = if (result.triggered && now - lastTestingTriggeredAtMs >= config.testingCooldownMs) {
+        val voteDecision = voteAggregator.submit(result.classification)
+        val effectiveTriggered = if (voteDecision.triggered && now - lastTestingTriggeredAtMs >= config.testingCooldownMs) {
             lastTestingTriggeredAtMs = now
+            appendLog(
+                "多次敲击投票触发：sector=${voteDecision.sector?.displayName}, " +
+                    "avgConfidence=${"%.3f".format(voteDecision.averageConfidence)}, " +
+                    "window=${voteDecision.windowSize}",
+            )
             true
         } else {
-            if (result.triggered) {
-                appendLog("检测命中但处于测试冷却中，已抑制重复触发")
+            if (voteDecision.triggered) {
+                appendLog("投票已命中但处于测试冷却中，已抑制重复触发")
+            } else if (voteDecision.validCount > 0) {
+                appendLog("投票收集中：${voteDecision.validCount}/${voteDecision.windowSize}")
             }
             false
         }
@@ -239,8 +259,8 @@ class TapDirectionViewModel(
                 latestDetection = LatestDetectionSummary(
                     triggered = effectiveTriggered,
                     delayMicroseconds = result.delaySeconds?.times(1_000_000.0),
-                    sector = result.sector,
-                    confidence = result.confidence,
+                    sector = if (effectiveTriggered) voteDecision.sector else result.sector,
+                    confidence = if (effectiveTriggered) voteDecision.averageConfidence else result.confidence,
                     classification = result.classification,
                     debugInfo = result.debugInfo,
                 ),
@@ -249,7 +269,9 @@ class TapDirectionViewModel(
                 statusMessage = when {
                     calibrationAccepted -> "标定样本已收录：${calibrationSession.progress().collectedCounts}"
                     calibrationFeedback != null -> calibrationFeedback
-                    effectiveTriggered -> "检测到有效敲击：${result.sector?.displayName ?: "未知"}"
+                    effectiveTriggered -> "投票确认触发：${voteDecision.sector?.displayName ?: "未知"}"
+                    voteDecision.validCount in 1 until voteDecision.windowSize ->
+                        "投票收集中：${voteDecision.validCount}/${voteDecision.windowSize}，请继续敲击"
                     result.classification?.rejectionReason != null -> "已拒识：${result.classification.rejectionReason}"
                     hasCandidate && !it.hasStoredCalibration -> "检测到候选敲击，等待标定数据"
                     hasCandidate -> "检测到候选敲击，但当前未触发"
@@ -291,5 +313,75 @@ class TapDirectionViewModel(
         viewModelScope.launch {
             recorder.stop()
         }
+    }
+}
+
+private data class VoteEntry(
+    val sector: SectorDirection,
+    val confidence: Double,
+)
+
+private data class VoteDecision(
+    val triggered: Boolean,
+    val sector: SectorDirection?,
+    val averageConfidence: Double,
+    val validCount: Int,
+    val windowSize: Int,
+)
+
+private class DetectionVoteAggregator(
+    windowSize: Int,
+    minAgreement: Int,
+    private val minAverageConfidence: Double,
+) {
+    private val windowSize = windowSize.coerceAtLeast(1)
+    private val minAgreement = minAgreement.coerceIn(1, this.windowSize)
+    private val entries = ArrayDeque<VoteEntry>()
+
+    fun reset() {
+        entries.clear()
+    }
+
+    fun submit(classification: ClassificationResult?): VoteDecision {
+        if (classification?.triggered == true && classification.sector != null) {
+            entries.addLast(
+                VoteEntry(
+                    sector = classification.sector,
+                    confidence = classification.confidence,
+                ),
+            )
+            while (entries.size > windowSize) {
+                entries.removeFirst()
+            }
+        }
+
+        if (entries.size < windowSize) {
+            return VoteDecision(
+                triggered = false,
+                sector = null,
+                averageConfidence = 0.0,
+                validCount = entries.size,
+                windowSize = windowSize,
+            )
+        }
+
+        val grouped = entries.groupBy { it.sector }
+        val best = grouped.maxByOrNull { (_, votes) ->
+            votes.size * 10_000 + votes.sumOf { it.confidence }
+        } ?: return VoteDecision(false, null, 0.0, entries.size, windowSize)
+        val bestSector = best.key
+        val bestVotes = best.value
+        val averageConfidence = bestVotes.map { it.confidence }.average()
+        val pass = bestVotes.size >= minAgreement && averageConfidence >= minAverageConfidence
+        if (pass) {
+            entries.clear()
+        }
+        return VoteDecision(
+            triggered = pass,
+            sector = if (pass) bestSector else null,
+            averageConfidence = if (pass) averageConfidence else 0.0,
+            validCount = entries.size,
+            windowSize = windowSize,
+        )
     }
 }
