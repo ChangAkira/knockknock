@@ -515,11 +515,16 @@ TDoA:
 3. **双击力度策略：已按新需求修改**  
    由“第二下偏轻更理想”改为“允许一轻一重，不限制先后顺序”；也就是第一下轻第二下重、或第一下重第二下轻都可触发。
 
-4. **8.3 TDoA 稳定性增强：暂未做结构改造**  
-   暂未引入 48kHz、多频段 GCC、新加窗策略；保留在下一步。
+4. **8.3 TDoA 稳定性增强：低风险版已落地（局部 GCC + 加窗 + 多频段融合 + 一致性惩罚）**  
+   已做 4 件事来让 GCC 主峰更尖、更稳：  
+   - **局部 GCC**：不再对整段事件窗做 GCC，而是围绕双峰中心截取约 `70 ms` 的局部片段再做 GCC（减少反射/拖尾干扰）。  
+   - **Hann 加窗**：在参与 GCC 的左右通道片段上加 Hann，降低边缘泄漏。  
+   - **多频段 GCC**：在 `100 Hz ~ 4000 Hz` 内划分子带分别 GCC，再做融合。  
+   - **一致性惩罚**：若各子带估计的时延分散度偏大，会对融合后的 `peakRatio` 做惩罚，从而让 `lagConfidence` 更保守。  
+   **尚未** 改为 `48 kHz` 采样率（仍保留为后续可选项）。
 
-5. **8.4 个体化统计模型：暂未做**  
-   当前仍以 KNN 主流程为主，后续再升级马氏距离/协方差模型。
+5. **8.4 个体化统计模型：已落地（对角马氏距离 + 距离拒识）**  
+   已为每个区域基于标定样本估计特征均值与（对角）标准差，用**马氏距离**替代“原始近邻”的核心几何判别分数，并在距离过大时触发拒识，用于抑制离群样本误判。为保持工程稳健性，当前实现采用对角协方差近似，后续若样本进一步增多可再考虑完整协方差。
 
 ### 13.2 代码层面的已改动点
 
@@ -527,6 +532,12 @@ TDoA:
   - `calibrationSamplesPerDirection: 6 -> 12`
   - 新增投票参数：`votingWindowSize`、`votingMinAgreement`、`votingMinAverageConfidence`
   - 新增双峰强弱平衡阈值：`minPeakBalanceRatio`
+  - 新增 GCC 相关：`gccApplyHannWindow`、`gccMultiBandEnabled`、`gccSubBandEdgesHz`、`gccMinSubBandWidthHz`
+
+- `app/src/main/java/com/example/testppppp/audio/dsp/GccPhatProcessor.kt`
+  - 单带路径：可选 Hann 加窗后再做 PHAT 与相关搜索
+  - 多带路径：对每子带 `bandPass` + 归一化后独立 GCC，再加权融合 `delaySeconds` / `peakRatio` / 主副峰
+  - 新增一致性惩罚：多频段时延分散时降低 `peakRatio`，使 `lagConfidence` 更稳健
 
 - `app/src/main/java/com/example/testppppp/ui/TapDirectionViewModel.kt`
   - 新增 `DetectionVoteAggregator`，将实时触发从单次改为多次投票确认
@@ -536,6 +547,7 @@ TDoA:
   - 新增 `peakBalanceRatio = min(peak1, peak2) / max(peak1, peak2)` 特征
   - 新增失败条件：双峰强弱失衡时拒绝
   - 质量分中对双峰关系的评分改为“强弱平衡可接受”导向，而非依赖“第二下偏轻”的单向偏置
+  - GCC 输入改为“围绕双峰的局部片段”，减少反射与拖尾对 TDoA 的干扰
 
 - `app/src/main/java/com/example/testppppp/audio/TapModels.kt`
   - `DetectionQualityMetrics` 新增 `peakBalanceRatio`
@@ -546,17 +558,17 @@ TDoA:
 |---|---|---|---|
 | 8.1 | 每区 `6 -> 12~20` | **已落地到 12** | 先做低风险提升，后续可继续调到 `15/18/20` |
 | 8.2 | 连续多次投票 | **已落地（3 次窗）** | 默认 3 次窗口，2 票一致 + 平均置信度门槛 |
-| 8.3 | 48k / 多频段 GCC / 加窗 | **未落地** | 下一阶段优先做低风险 GCC 稳定性增强 |
-| 8.4 | 统计模型（马氏距离） | **未落地** | 需在样本进一步增多后推进 |
+| 8.3 | 48k / 多频段 GCC / 加窗 | **部分落地** | 已加窗 + 多子带 GCC 融合；**48 kHz 仍未做** |
+| 8.4 | 统计模型（马氏距离） | **已落地** | 先用对角协方差 + 距离拒识；样本更多后再考虑完整协方差 |
 
 ### 13.4 下一步建议（紧接当前实现）
 
 1. 在同一设备、同一桌面下做一次 A/B 对比：  
    - A：旧参数（6 样本 + 单次触发）  
-   - B：新参数（12 样本 + 3 次投票）  
+   - B：新参数（12 样本 + 3 次投票 + 多频段 GCC）  
    重点看 `TOP/BOTTOM` 混淆是否下降。
 
 2. 若 B 明显更稳，再把每区样本数从 `12` 提高到 `15` 或 `18`，并保持轻/中/重覆盖。
 
-3. 进入下一阶段时，优先做 8.3 的低风险版本（先多频段 GCC 与加窗，再评估是否上 48k）。
+3. **下一阶段**（若双通道稳定且需要更高时间分辨率）：评估 `48 kHz` 采集，并相应复核 `bandPass`、`hop`、CPU 占用与 `maxLagSamples` 行为。
 

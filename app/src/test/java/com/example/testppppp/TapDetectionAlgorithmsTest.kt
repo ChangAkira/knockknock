@@ -42,7 +42,12 @@ class TapDetectionAlgorithmsTest {
 
     @Test
     fun `gcc phat estimates delay for shifted impulses`() {
-        val config = TapDetectionConfig(sampleRateHz = 8_000, microphoneDistanceMeters = 0.25f)
+        val config = TapDetectionConfig(
+            sampleRateHz = 8_000,
+            microphoneDistanceMeters = 0.25f,
+            gccMultiBandEnabled = false,
+            gccApplyHannWindow = false,
+        )
         val left = FloatArray(256)
         val right = FloatArray(256)
         left[80] = 1f

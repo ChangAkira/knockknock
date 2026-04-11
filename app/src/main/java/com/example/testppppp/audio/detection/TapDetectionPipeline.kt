@@ -98,7 +98,14 @@ class TapDetectionPipeline(
         }
 
         val candidate = selection.bestValid
-        val gccResult = gccPhatProcessor.estimateDelay(normalizedLeft, normalizedRight)
+        val (gccLeft, gccRight) = extractGccWindow(
+            left = normalizedLeft,
+            right = normalizedRight,
+            firstPeakIndex = candidate.pair.first.sampleIndex,
+            secondPeakIndex = candidate.pair.second.sampleIndex,
+            sampleRateHz = frame.sampleRateHz,
+        )
+        val gccResult = gccPhatProcessor.estimateDelay(gccLeft, gccRight)
         val lagConfidence = computeLagConfidence(gccResult)
         val classifierFailureHints = buildLagHints(gccResult, lagConfidence)
         val classification = classifier.classify(
@@ -506,6 +513,24 @@ class TapDetectionPipeline(
             hints += "时差置信度较低，仅作弱提示"
         }
         return hints
+    }
+
+    private fun extractGccWindow(
+        left: FloatArray,
+        right: FloatArray,
+        firstPeakIndex: Int,
+        secondPeakIndex: Int,
+        sampleRateHz: Int,
+    ): Pair<FloatArray, FloatArray> {
+        val windowSamples = (config.gccEventWindowMs * sampleRateHz / 1_000).coerceAtLeast(64)
+        val center = ((firstPeakIndex + secondPeakIndex) / 2).coerceIn(0, left.lastIndex)
+        val start = (center - windowSamples / 2).coerceAtLeast(0)
+        val endExclusive = (start + windowSamples).coerceAtMost(left.size)
+        val safeStart = (endExclusive - windowSamples).coerceAtLeast(0)
+        return Pair(
+            left.copyOfRange(safeStart, endExclusive),
+            right.copyOfRange(safeStart, endExclusive),
+        )
     }
 
     private data class CandidateSelection(

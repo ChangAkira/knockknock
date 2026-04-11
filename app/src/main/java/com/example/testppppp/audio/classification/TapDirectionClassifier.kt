@@ -7,6 +7,9 @@ import com.example.testppppp.audio.GccPhatResult
 import com.example.testppppp.audio.SectorDirection
 import com.example.testppppp.audio.TapDetectionConfig
 import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 class TapDirectionClassifier(
@@ -14,9 +17,12 @@ class TapDirectionClassifier(
 ) {
     @Volatile
     private var calibrationData: CalibrationData? = null
+    @Volatile
+    private var statModels: Map<SectorDirection, StatModel>? = null
 
     fun updateCalibration(data: CalibrationData?) {
         calibrationData = data
+        statModels = data?.let { buildStatModels(it) }
     }
 
     fun classify(
@@ -54,21 +60,45 @@ class TapDirectionClassifier(
             lagConfidence = lagConfidence,
         )
 
-        val allVectors = buildLabeledVectors(calibration)
-        val multiClassResult = multiClassKnn(
-            input = input,
-            samples = allVectors,
-            k = balancedK(
-                maxK = 5,
-                groupSizes = listOf(topSamples.size, rightSamples.size, bottomSamples.size),
-            ),
-        )
-        val rightGateResult = rightVsNotRightKnn(
-            input = input,
-            topSamples = topSamples,
-            rightSamples = rightSamples,
-            bottomSamples = bottomSamples,
-        )
+        val (multiClassResult, rightGateResult, statDistanceByLabel) = if (config.statModelEnabled) {
+            val models = statModels
+            if (models == null || models.size < 3) {
+                val allVectors = buildLabeledVectors(calibration)
+                val knn = multiClassKnn(
+                    input = input,
+                    samples = allVectors,
+                    k = balancedK(maxK = 5, groupSizes = listOf(topSamples.size, rightSamples.size, bottomSamples.size)),
+                )
+                val gate = rightVsNotRightKnn(
+                    input = input,
+                    topSamples = topSamples,
+                    rightSamples = rightSamples,
+                    bottomSamples = bottomSamples,
+                )
+                Triple(knn, gate, emptyMap())
+            } else {
+                val stat = multiClassStatModel(input, models)
+                val gate = rightVsNotRightStatModel(input, models)
+                Triple(stat.summary, gate, stat.distanceByLabel)
+            }
+        } else {
+            val allVectors = buildLabeledVectors(calibration)
+            val knn = multiClassKnn(
+                input = input,
+                samples = allVectors,
+                k = balancedK(
+                    maxK = 5,
+                    groupSizes = listOf(topSamples.size, rightSamples.size, bottomSamples.size),
+                ),
+            )
+            val gate = rightVsNotRightKnn(
+                input = input,
+                topSamples = topSamples,
+                rightSamples = rightSamples,
+                bottomSamples = bottomSamples,
+            )
+            Triple(knn, gate, emptyMap())
+        }
 
         val stagedDecision = when {
             rightGateResult.acceptRight -> StageDecision.RIGHT
@@ -97,17 +127,24 @@ class TapDirectionClassifier(
         val c3 = lagConfidence.coerceAtLeast(config.lowLagConfidenceHint)
         val confidence = c1 * c2 * c3
 
-        val boundaryReject = selectedSector != null && (bestScore - secondBestScore) < 0.10
+        val boundaryReject = selectedSector != null && (bestScore - secondBestScore) < (if (config.statModelEnabled) config.statModelMarginReject else 0.10)
         val peakRatioReject = gccResult.peakRatio < config.minPeakRatio
         val lowConfidenceReject = confidence < config.testingConfidenceThreshold || qualityScore < config.testingAcceptedQualityScore
         val rightBalanceReject = selectedSector == SectorDirection.RIGHT && !rightGateResult.acceptRight
+        val statDistanceReject = if (!config.statModelEnabled || selectedSector == null) {
+            false
+        } else {
+            val d = statDistanceByLabel[selectedSector]
+            d != null && d.isFinite() && d > config.statModelDistanceRejectThreshold
+        }
 
         val rejectionReason = when {
             stagedDecision == StageDecision.REJECT -> rightGateResult.reason ?: "KNN stage rejected sample"
             lowConfidenceReject -> "Confidence below threshold"
-            boundaryReject -> "KNN vote margin too small"
+            boundaryReject -> "Decision margin too small"
             rightBalanceReject -> "Right-region KNN gate not satisfied"
             peakRatioReject -> "GCC primary/secondary peak ratio too low"
+            statDistanceReject -> "Stat-model distance too large"
             else -> null
         }
 
@@ -350,6 +387,70 @@ class TapDirectionClassifier(
 
     private fun safeLog(value: Double): Double = ln(value.coerceAtLeast(1e-6))
 
+    private fun buildStatModels(calibration: CalibrationData): Map<SectorDirection, StatModel> {
+        val models = mutableMapOf<SectorDirection, StatModel>()
+        SectorDirection.ordered.forEach { label ->
+            val vectors = calibration.rawSamples[label].orEmpty().map { it.toFeatureVector() }
+            if (vectors.size < 3) return@forEach
+            models[label] = StatModel.fromVectors(vectors)
+        }
+        return models
+    }
+
+    private data class StatResult(
+        val summary: MultiClassSummary,
+        val distanceByLabel: Map<SectorDirection, Double>,
+    )
+
+    private fun multiClassStatModel(input: FeatureVector, models: Map<SectorDirection, StatModel>): StatResult {
+        val weights = FEATURE_WEIGHTS
+        val distances = SectorDirection.ordered.associateWith { label ->
+            val model = models.getValue(label)
+            model.diagonalMahalanobisDistance(input, weights)
+        }
+        val scores = distances.mapValues { (_, d) ->
+            1.0 / (d.coerceAtLeast(1e-6))
+        }.normalizeScores()
+        // 在统计模型模式下，voteCount/avgDistance 沿用字段但语义变成“模型距离”
+        val voteCount = SectorDirection.ordered.associateWith { 0 }
+        val avgDistance = SectorDirection.ordered.associateWith { label -> distances[label] ?: Double.POSITIVE_INFINITY }
+        return StatResult(
+            summary = MultiClassSummary(scores, voteCount, avgDistance),
+            distanceByLabel = distances,
+        )
+    }
+
+    private fun rightVsNotRightStatModel(input: FeatureVector, models: Map<SectorDirection, StatModel>): RightGateResult {
+        val weights = FEATURE_WEIGHTS
+        val dRight = models.getValue(SectorDirection.RIGHT).diagonalMahalanobisDistance(input, weights)
+        val dTop = models.getValue(SectorDirection.TOP).diagonalMahalanobisDistance(input, weights)
+        val dBottom = models.getValue(SectorDirection.BOTTOM).diagonalMahalanobisDistance(input, weights)
+        val dNotRight = min(dTop, dBottom)
+        val rightScore = 1.0 / dRight.coerceAtLeast(1e-6)
+        val notRightScore = 1.0 / dNotRight.coerceAtLeast(1e-6)
+
+        return when {
+            rightScore > notRightScore * 1.05 -> RightGateResult(
+                acceptRight = true,
+                rejectAsNotRight = false,
+                reason = null,
+                stageDescription = "STAT rightGate=right",
+            )
+            notRightScore > rightScore * 1.05 -> RightGateResult(
+                acceptRight = false,
+                rejectAsNotRight = true,
+                reason = null,
+                stageDescription = "STAT rightGate=notRight",
+            )
+            else -> RightGateResult(
+                acceptRight = false,
+                rejectAsNotRight = false,
+                reason = "Right-vs-notRight stat-model uncertain",
+                stageDescription = "STAT rightGate=uncertain",
+            )
+        }
+    }
+
     private fun balancedK(
         maxK: Int,
         groupSizes: List<Int>,
@@ -440,5 +541,52 @@ class TapDirectionClassifier(
             0.9, // logSecondPeakRatio
             0.7, // lagConfidence
         )
+    }
+
+    private data class StatModel(
+        val mean: DoubleArray,
+        val stddev: DoubleArray,
+    ) {
+        fun diagonalMahalanobisDistance(x: FeatureVector, weights: DoubleArray): Double {
+            val values = x.toArray()
+            var sum = 0.0
+            for (i in values.indices) {
+                val sigma = stddev[i].coerceAtLeast(1e-9)
+                val z = (values[i] - mean[i]) / sigma
+                sum += weights[i] * z * z
+            }
+            return sqrt(sum)
+        }
+
+        companion object {
+            fun fromVectors(vectors: List<FeatureVector>): StatModel {
+                val dim = vectors.firstOrNull()?.toArray()?.size ?: 0
+                val mean = DoubleArray(dim)
+                vectors.forEach { v ->
+                    val arr = v.toArray()
+                    for (i in 0 until dim) mean[i] += arr[i]
+                }
+                val denom = vectors.size.coerceAtLeast(1).toDouble()
+                for (i in 0 until dim) {
+                    mean[i] = mean[i] / denom
+                }
+                val varr = DoubleArray(dim)
+                vectors.forEach { v ->
+                    val arr = v.toArray()
+                    for (i in 0 until dim) {
+                        val d = arr[i] - mean[i]
+                        varr[i] += d * d
+                    }
+                }
+                val std = DoubleArray(dim) { i ->
+                    sqrt((varr[i] / vectors.size.coerceAtLeast(1)).coerceAtLeast(0.0))
+                }
+                val floors = doubleArrayOf(5e-5, 0.08, 0.08, 0.08, 0.08, 0.05)
+                for (i in 0 until dim) {
+                    std[i] = max(std[i], floors.getOrElse(i) { 1e-6 })
+                }
+                return StatModel(mean, std)
+            }
+        }
     }
 }

@@ -37,6 +37,13 @@ data class TapDetectionConfig(
     val minPeakRatio: Double = 1.04,
     val lowLagConfidenceHint: Double = 0.08,
     val lagConfidenceMultiplier: Double = 3.2,
+    val gccApplyHannWindow: Boolean = true,
+    val gccMultiBandEnabled: Boolean = true,
+    val gccMinSubBandWidthHz: Float = 80f,
+    val gccSubBandEdgesHz: List<Float> = listOf(100f, 1_400f, 2_700f, 4_000f),
+    val gccEventWindowMs: Int = 70,
+    val gccLagStddevPenaltyThresholdSamples: Double = 1.2,
+    val gccLagStddevPenaltyFloor: Double = 0.55,
     val calibrationSamplesPerDirection: Int = 12,
     val calibrationAcceptedQualityScore: Double = 56.0,
     val testingAcceptedQualityScore: Double = 52.0,
@@ -45,6 +52,9 @@ data class TapDetectionConfig(
     val votingWindowSize: Int = 3,
     val votingMinAgreement: Int = 2,
     val votingMinAverageConfidence: Double = 0.26,
+    val statModelEnabled: Boolean = true,
+    val statModelDistanceRejectThreshold: Double = 4.2,
+    val statModelMarginReject: Double = 0.10,
     val maxLogEntries: Int = 120,
 ) {
     val windowSizeSamples: Int = sampleRateHz * windowMs / 1_000
