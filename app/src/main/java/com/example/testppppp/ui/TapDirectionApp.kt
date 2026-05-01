@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -26,15 +29,22 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -46,6 +56,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.testppppp.audio.AudioCaptureStatus
 import com.example.testppppp.audio.DetectionDebugInfo
+import com.example.testppppp.audio.SectorDirection
+import com.example.testppppp.remote.InteractionMode
+import com.example.testppppp.remote.RemoteDemoSettings
 import kotlin.math.max
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,6 +90,13 @@ fun TapDirectionApp(
             )
         },
     ) { innerPadding ->
+        uiState.mode2PendingInput?.let { pending ->
+            Mode2InputDialog(
+                pending = pending,
+                onDismiss = viewModel::dismissMode2Input,
+                onSubmit = viewModel::submitMode2Input,
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -94,6 +114,17 @@ fun TapDirectionApp(
                 onStartCalibration = viewModel::startCalibration,
                 onCancelCalibration = viewModel::cancelCalibration,
                 onClearCalibration = viewModel::clearCalibration,
+            )
+            RemoteDemoCard(
+                interactionMode = uiState.interactionMode,
+                modeIndicatorPulseGeneration = uiState.modeIndicatorPulseGeneration,
+                remoteDemo = uiState.remoteDemo,
+                remoteLastMessage = uiState.remoteLastMessage,
+                onInteractionModeChange = viewModel::setInteractionMode,
+                onEnabledChange = viewModel::setRemoteDemoEnabled,
+                onBaseUrlChange = viewModel::setRemoteBaseUrl,
+                onTokenChange = viewModel::setRemoteAuthToken,
+                onTestConnection = viewModel::testRemoteConnection,
             )
             LatestDetectionCard(uiState)
             WaveformCard(uiState.latestDetection?.debugInfo)
@@ -204,6 +235,172 @@ private fun ActionCard(
 }
 
 @Composable
+private fun Mode2InputDialog(
+    pending: Mode2PendingInput,
+    onDismiss: () -> Unit,
+    onSubmit: (String) -> Unit,
+) {
+    var text by remember(pending.sector) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("模式2 · 补充输入") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "扇区: ${pending.sector.displayName}，置信度 ${"%.2f".format(pending.confidence)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("发送给 Ollama 的文本") },
+                    minLines = 2,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSubmit(text) }) {
+                Text("发送")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RemoteDemoCard(
+    interactionMode: InteractionMode,
+    modeIndicatorPulseGeneration: Long,
+    remoteDemo: RemoteDemoSettings,
+    remoteLastMessage: String?,
+    onInteractionModeChange: (InteractionMode) -> Unit,
+    onEnabledChange: (Boolean) -> Unit,
+    onBaseUrlChange: (String) -> Unit,
+    onTokenChange: (String) -> Unit,
+    onTestConnection: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("跨设备演示 (PC Flask)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "单次高置信识别触发后联网。请先运行 pc-remote（模式1：/command；模式2：/llm + 本机 Ollama）。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("交互模式")
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("模式1", style = MaterialTheme.typography.bodySmall)
+                    Switch(
+                        checked = interactionMode == InteractionMode.MODE2_LLM,
+                        onCheckedChange = { on ->
+                            onInteractionModeChange(
+                                if (on) InteractionMode.MODE2_LLM else InteractionMode.MODE1_PPT,
+                            )
+                        },
+                    )
+                    Text("模式2", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            ModeIndicatorChip(
+                mode = interactionMode,
+                pulseGeneration = modeIndicatorPulseGeneration,
+            )
+            Text(
+                when (interactionMode) {
+                    InteractionMode.MODE1_PPT ->
+                        "模式1 固定映射：Top→上一页，Right→显示桌面，Bottom→下一页（POST /command）。"
+                    InteractionMode.MODE2_LLM ->
+                        "模式2：上/右/下敲击后先弹出输入框，再 POST /llm（英文空间说明 + 你的文本）。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("启用远程指令")
+                Switch(
+                    checked = remoteDemo.enabled,
+                    onCheckedChange = onEnabledChange,
+                )
+            }
+            OutlinedTextField(
+                value = remoteDemo.baseUrl,
+                onValueChange = onBaseUrlChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Base URL（例 http://192.168.1.5:5000）") },
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = remoteDemo.authToken,
+                onValueChange = onTokenChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("X-Auth-Token（可选，与 PC 环境变量 REMOTE_TOKEN 一致）") },
+                singleLine = true,
+            )
+            OutlinedButton(
+                onClick = onTestConnection,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("测试连接（GET /health）")
+            }
+            if (remoteLastMessage != null) {
+                Text(
+                    "最近结果: $remoteLastMessage",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModeIndicatorChip(
+    mode: InteractionMode,
+    pulseGeneration: Long,
+) {
+    val scaleAnim = remember { Animatable(1f) }
+    LaunchedEffect(pulseGeneration) {
+        if (pulseGeneration <= 0L) return@LaunchedEffect
+        scaleAnim.snapTo(1f)
+        scaleAnim.animateTo(1.12f, tween(100))
+        scaleAnim.animateTo(1f, tween(220))
+    }
+    Surface(
+        modifier = Modifier
+            .scale(scaleAnim.value)
+            .padding(vertical = 4.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+    ) {
+        Text(
+            text = "当前：${mode.displayLabel}",
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
 private fun LatestDetectionCard(uiState: TapDirectionUiState) {
     Card {
         Column(
@@ -254,7 +451,7 @@ private fun LatestDetectionCard(uiState: TapDirectionUiState) {
                         "bottom=${"%.3f".format(latest.classification?.bottomScore ?: 0.0)}",
                 )
                 Text(
-                    "KNN 投票: top=${latest.classification?.topVotes ?: 0}, " +
+                    "KNN 近邻计数: top=${latest.classification?.topVotes ?: 0}, " +
                         "right=${latest.classification?.rightVotes ?: 0}, " +
                         "bottom=${latest.classification?.bottomVotes ?: 0}",
                 )

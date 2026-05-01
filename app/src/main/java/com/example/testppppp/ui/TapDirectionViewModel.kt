@@ -1,12 +1,15 @@
 package com.example.testppppp.ui
 
 import android.app.Application
+import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.testppppp.audio.AudioCaptureStatus
 import com.example.testppppp.audio.CalibrationSample
-import com.example.testppppp.audio.ClassificationResult
 import com.example.testppppp.audio.SectorDirection
 import com.example.testppppp.audio.TapDetectionConfig
 import com.example.testppppp.audio.TapDetectionResult
@@ -16,6 +19,13 @@ import com.example.testppppp.audio.classification.TapDirectionClassifier
 import com.example.testppppp.audio.detection.StreamingTapDetector
 import com.example.testppppp.audio.detection.TapDetectionPipeline
 import com.example.testppppp.audio.input.DualChannelAudioRecorder
+import com.example.testppppp.remote.InteractionMode
+import com.example.testppppp.remote.InteractionModePreferences
+import com.example.testppppp.remote.RemoteCommandClient
+import com.example.testppppp.remote.RemoteDemoPreferences
+import com.example.testppppp.remote.RemoteDemoSettings
+import com.example.testppppp.remote.RemotePcAction
+import com.example.testppppp.remote.RemoteSendResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,16 +39,13 @@ class TapDirectionViewModel(
 ) : AndroidViewModel(application) {
     private val config = TapDetectionConfig()
     private val calibrationRepository = CalibrationRepository(application)
+    private val remoteDemoPreferences = RemoteDemoPreferences(application)
+    private val interactionModePreferences = InteractionModePreferences(application)
     private val classifier = TapDirectionClassifier(config)
     private val pipeline = TapDetectionPipeline(config, classifier)
     private val streamingDetector = StreamingTapDetector(config, pipeline)
     private val recorder = DualChannelAudioRecorder(config)
     private val calibrationSession = CalibrationSession(config.calibrationSamplesPerDirection)
-    private val voteAggregator = DetectionVoteAggregator(
-        windowSize = config.votingWindowSize,
-        minAgreement = config.votingMinAgreement,
-        minAverageConfidence = config.votingMinAverageConfidence,
-    )
     private val isProcessingFrame = AtomicBoolean(false)
     private var lastCalibrationAcceptedAtMs: Long = 0L
     private var lastTestingTriggeredAtMs: Long = 0L
@@ -53,6 +60,96 @@ class TapDirectionViewModel(
 
     init {
         reloadCalibration()
+        _uiState.update {
+            it.copy(
+                remoteDemo = remoteDemoPreferences.load(),
+                interactionMode = interactionModePreferences.load(),
+            )
+        }
+    }
+
+    fun setInteractionMode(mode: InteractionMode) {
+        val current = _uiState.value.interactionMode
+        if (mode == current) return
+        interactionModePreferences.save(mode)
+        pulseVibrate()
+        _uiState.update {
+            it.copy(
+                interactionMode = mode,
+                modeIndicatorPulseGeneration = it.modeIndicatorPulseGeneration + 1L,
+            )
+        }
+    }
+
+    fun dismissMode2Input() {
+        _uiState.update { it.copy(mode2PendingInput = null) }
+    }
+
+    fun submitMode2Input(userText: String) {
+        val pending = _uiState.value.mode2PendingInput ?: return
+        val trimmed = userText.trim()
+        if (trimmed.isEmpty()) {
+            appendLog("模式2：未输入文本，已取消发送")
+            dismissMode2Input()
+            return
+        }
+        val remote = _uiState.value.remoteDemo
+        if (!remote.enabled) {
+            appendLog("模式2：远程未启用")
+            dismissMode2Input()
+            return
+        }
+        val sectorKey = pending.sector.name
+        _uiState.update { it.copy(mode2PendingInput = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val sendResult = RemoteCommandClient.postLlm(
+                baseUrl = remote.baseUrl,
+                spatialSector = sectorKey,
+                userText = trimmed,
+                authToken = remote.authToken,
+            )
+            val msg = when (sendResult) {
+                is RemoteSendResult.Success ->
+                    "模式2 Ollama HTTP ${sendResult.httpCode} ${sendResult.bodySnippet}"
+                is RemoteSendResult.Failure ->
+                    "模式2 请求失败: ${sendResult.message}"
+            }
+            _uiState.update { it.copy(remoteLastMessage = msg) }
+            appendLog(msg)
+        }
+    }
+
+    fun setRemoteDemoEnabled(enabled: Boolean) {
+        val next = _uiState.value.remoteDemo.copy(enabled = enabled)
+        persistRemoteDemo(next)
+    }
+
+    fun setRemoteBaseUrl(url: String) {
+        val next = _uiState.value.remoteDemo.copy(baseUrl = url)
+        persistRemoteDemo(next)
+    }
+
+    fun setRemoteAuthToken(token: String) {
+        val next = _uiState.value.remoteDemo.copy(authToken = token)
+        persistRemoteDemo(next)
+    }
+
+    fun testRemoteConnection() {
+        val settings = _uiState.value.remoteDemo
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = RemoteCommandClient.getHealth(settings.baseUrl, settings.authToken)
+            val msg = when (result) {
+                is RemoteSendResult.Success -> "连接成功 HTTP ${result.httpCode} ${result.bodySnippet}"
+                is RemoteSendResult.Failure -> "连接失败: ${result.message}"
+            }
+            _uiState.update { it.copy(remoteLastMessage = msg) }
+            appendLog("跨设备测试: $msg")
+        }
+    }
+
+    private fun persistRemoteDemo(settings: RemoteDemoSettings) {
+        remoteDemoPreferences.save(settings)
+        _uiState.update { it.copy(remoteDemo = settings) }
     }
 
     fun onPermissionResult(granted: Boolean) {
@@ -75,7 +172,6 @@ class TapDirectionViewModel(
         }
 
         streamingDetector.reset()
-        voteAggregator.reset()
 
         recorder.start(
             scope = viewModelScope,
@@ -102,7 +198,6 @@ class TapDirectionViewModel(
         viewModelScope.launch {
             recorder.stop()
             streamingDetector.reset()
-            voteAggregator.reset()
             _uiState.update {
                 it.copy(
                     audioCaptureStatus = AudioCaptureStatus.Idle,
@@ -115,7 +210,6 @@ class TapDirectionViewModel(
     fun startCalibration() {
         calibrationSession.start()
         lastCalibrationAcceptedAtMs = 0L
-        voteAggregator.reset()
         _uiState.update {
             it.copy(
                 calibrationProgress = calibrationSession.progress(),
@@ -127,7 +221,6 @@ class TapDirectionViewModel(
 
     fun cancelCalibration() {
         calibrationSession.cancel()
-        voteAggregator.reset()
         _uiState.update {
             it.copy(
                 calibrationProgress = calibrationSession.progress(),
@@ -140,7 +233,6 @@ class TapDirectionViewModel(
     fun clearCalibration() {
         calibrationRepository.clear()
         classifier.updateCalibration(null)
-        voteAggregator.reset()
         _uiState.update {
             it.copy(
                 hasStoredCalibration = false,
@@ -229,22 +321,56 @@ class TapDirectionViewModel(
             }
         }
 
-        val voteDecision = voteAggregator.submit(result.classification)
-        val effectiveTriggered = if (voteDecision.triggered && now - lastTestingTriggeredAtMs >= config.testingCooldownMs) {
+        val effectiveTriggered = if (result.triggered && now - lastTestingTriggeredAtMs >= config.testingCooldownMs) {
             lastTestingTriggeredAtMs = now
             appendLog(
-                "多次敲击投票触发：sector=${voteDecision.sector?.displayName}, " +
-                    "avgConfidence=${"%.3f".format(voteDecision.averageConfidence)}, " +
-                    "window=${voteDecision.windowSize}",
+                "单次高置信触发：sector=${result.sector?.displayName}, " +
+                    "confidence=${"%.3f".format(result.confidence)}",
             )
             true
         } else {
-            if (voteDecision.triggered) {
-                appendLog("投票已命中但处于测试冷却中，已抑制重复触发")
-            } else if (voteDecision.validCount > 0) {
-                appendLog("投票收集中：${voteDecision.validCount}/${voteDecision.windowSize}")
+            if (result.triggered) {
+                appendLog("检测命中但处于测试冷却中，已抑制重复触发")
             }
             false
+        }
+
+        if (effectiveTriggered && result.sector != null) {
+            val remote = _uiState.value.remoteDemo
+            val mode = _uiState.value.interactionMode
+            if (remote.enabled) {
+                when (mode) {
+                    InteractionMode.MODE1_PPT -> {
+                        val pcAction = mode1RemoteAction(result.sector)
+                        viewModelScope.launch(Dispatchers.IO) {
+                            val sendResult = RemoteCommandClient.postCommand(
+                                baseUrl = remote.baseUrl,
+                                action = pcAction,
+                                authToken = remote.authToken,
+                            )
+                            val msg = when (sendResult) {
+                                is RemoteSendResult.Success ->
+                                    "跨设备已发送: ${pcAction.jsonName} HTTP ${sendResult.httpCode}"
+                                is RemoteSendResult.Failure ->
+                                    "跨设备发送失败 (${pcAction.jsonName}): ${sendResult.message}"
+                            }
+                            _uiState.update { it.copy(remoteLastMessage = msg) }
+                            appendLog(msg)
+                        }
+                    }
+                    InteractionMode.MODE2_LLM -> {
+                        _uiState.update {
+                            it.copy(
+                                mode2PendingInput = Mode2PendingInput(
+                                    sector = result.sector,
+                                    confidence = result.confidence,
+                                ),
+                            )
+                        }
+                        appendLog("模式2：请补充文本后将请求发送至 Ollama（扇区=${result.sector.displayName}）")
+                    }
+                }
+            }
         }
 
         val calibrationProgress = if (calibrationSession.isComplete()) {
@@ -259,8 +385,8 @@ class TapDirectionViewModel(
                 latestDetection = LatestDetectionSummary(
                     triggered = effectiveTriggered,
                     delayMicroseconds = result.delaySeconds?.times(1_000_000.0),
-                    sector = if (effectiveTriggered) voteDecision.sector else result.sector,
-                    confidence = if (effectiveTriggered) voteDecision.averageConfidence else result.confidence,
+                    sector = result.sector,
+                    confidence = result.confidence,
                     classification = result.classification,
                     debugInfo = result.debugInfo,
                 ),
@@ -269,9 +395,7 @@ class TapDirectionViewModel(
                 statusMessage = when {
                     calibrationAccepted -> "标定样本已收录：${calibrationSession.progress().collectedCounts}"
                     calibrationFeedback != null -> calibrationFeedback
-                    effectiveTriggered -> "投票确认触发：${voteDecision.sector?.displayName ?: "未知"}"
-                    voteDecision.validCount in 1 until voteDecision.windowSize ->
-                        "投票收集中：${voteDecision.validCount}/${voteDecision.windowSize}，请继续敲击"
+                    effectiveTriggered -> "检测到有效敲击：${result.sector?.displayName ?: "未知"}"
                     result.classification?.rejectionReason != null -> "已拒识：${result.classification.rejectionReason}"
                     hasCandidate && !it.hasStoredCalibration -> "检测到候选敲击，等待标定数据"
                     hasCandidate -> "检测到候选敲击，但当前未触发"
@@ -299,6 +423,29 @@ class TapDirectionViewModel(
 
     private fun classifierHasCalibration(): Boolean = calibrationRepository.load() != null
 
+    /**
+     * 模式1 固定映射：上→上一页，右→显示桌面，下→下一页。
+     */
+    private fun mode1RemoteAction(sector: SectorDirection): RemotePcAction =
+        when (sector) {
+            SectorDirection.TOP -> RemotePcAction.PPT_PREVIOUS
+            SectorDirection.RIGHT -> RemotePcAction.SHOW_DESKTOP
+            SectorDirection.BOTTOM -> RemotePcAction.PPT_NEXT
+        }
+
+    @Suppress("DEPRECATION")
+    private fun pulseVibrate() {
+        val app = getApplication<Application>()
+        val vibrator = app.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(
+                VibrationEffect.createOneShot(45, VibrationEffect.DEFAULT_AMPLITUDE),
+            )
+        } else {
+            vibrator.vibrate(45)
+        }
+    }
+
     private fun appendLog(message: String) {
         Log.d("TapDirection", message)
         val timestamp = System.currentTimeMillis()
@@ -313,75 +460,5 @@ class TapDirectionViewModel(
         viewModelScope.launch {
             recorder.stop()
         }
-    }
-}
-
-private data class VoteEntry(
-    val sector: SectorDirection,
-    val confidence: Double,
-)
-
-private data class VoteDecision(
-    val triggered: Boolean,
-    val sector: SectorDirection?,
-    val averageConfidence: Double,
-    val validCount: Int,
-    val windowSize: Int,
-)
-
-private class DetectionVoteAggregator(
-    windowSize: Int,
-    minAgreement: Int,
-    private val minAverageConfidence: Double,
-) {
-    private val windowSize = windowSize.coerceAtLeast(1)
-    private val minAgreement = minAgreement.coerceIn(1, this.windowSize)
-    private val entries = ArrayDeque<VoteEntry>()
-
-    fun reset() {
-        entries.clear()
-    }
-
-    fun submit(classification: ClassificationResult?): VoteDecision {
-        if (classification?.triggered == true && classification.sector != null) {
-            entries.addLast(
-                VoteEntry(
-                    sector = classification.sector,
-                    confidence = classification.confidence,
-                ),
-            )
-            while (entries.size > windowSize) {
-                entries.removeFirst()
-            }
-        }
-
-        if (entries.size < windowSize) {
-            return VoteDecision(
-                triggered = false,
-                sector = null,
-                averageConfidence = 0.0,
-                validCount = entries.size,
-                windowSize = windowSize,
-            )
-        }
-
-        val grouped = entries.groupBy { it.sector }
-        val best = grouped.maxByOrNull { (_, votes) ->
-            votes.size * 10_000 + votes.sumOf { it.confidence }
-        } ?: return VoteDecision(false, null, 0.0, entries.size, windowSize)
-        val bestSector = best.key
-        val bestVotes = best.value
-        val averageConfidence = bestVotes.map { it.confidence }.average()
-        val pass = bestVotes.size >= minAgreement && averageConfidence >= minAverageConfidence
-        if (pass) {
-            entries.clear()
-        }
-        return VoteDecision(
-            triggered = pass,
-            sector = if (pass) bestSector else null,
-            averageConfidence = if (pass) averageConfidence else 0.0,
-            validCount = entries.size,
-            windowSize = windowSize,
-        )
     }
 }
