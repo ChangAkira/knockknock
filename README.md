@@ -59,7 +59,7 @@
 交互指令  →  模式1 POST /command   |   模式2 补充文本后 POST /llm
 ```
 
-方法细节见 [`Notes/technical-report.md`](Notes/technical-report.md) 与 [`Notes/4关键方法.txt`](Notes/4关键方法.txt)。
+方法细节对应到代码：检测与质量评分在 [`TapDetectionPipeline.kt`](app/src/main/java/com/example/testppppp/audio/detection/TapDetectionPipeline.kt)，时延估计在 [`GccPhatProcessor.kt`](app/src/main/java/com/example/testppppp/audio/dsp/GccPhatProcessor.kt)，分层判别与置信度在 [`TapDirectionClassifier.kt`](app/src/main/java/com/example/testppppp/audio/classification/TapDirectionClassifier.kt)。
 
 ## 3. 目录结构
 
@@ -82,8 +82,8 @@
 │   ├── ui/                                        # Compose 界面、ViewModel、实时调试面板
 │   └── MainActivity.kt
 ├── app/src/test/.../TapDetectionAlgorithmsTest.kt # 算法层单元测试
-├── pc-remote/                                     # Flask 远程服务与说明
-└── Notes/                                         # 设计笔记、技术分析、论文草稿
+├── docs/images/                                   # README 用图
+└── pc-remote/                                     # Flask 远程服务与说明
 ```
 
 ## 4. 快速开始
@@ -204,4 +204,6 @@ python app.py                         # 默认监听 0.0.0.0:5000
 
 ## 9. 说明
 
-本仓库为本科毕业设计原型代码，处于可复现演示的水平而非产品化状态：包名 `com.example.testppppp`、部分阈值与界面文案仍保留开发期形态，`Notes/` 下是设计与实验过程中的笔记与论文草稿。
+本仓库为本科毕业设计原型代码，处于可复现演示的水平而非产品化状态：包名 `com.example.testppppp`、部分阈值与界面文案仍保留开发期形态。
+
+完整的算法推导、参数取值依据与实验分析见毕业设计论文《基于声学感知的桌面交互系统设计与实现》（2026），脱敏版 PDF 见仓库 [Releases](https://github.com/ChangAkira/knockknock/releases)。
