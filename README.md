@@ -206,4 +206,4 @@ python app.py                         # 默认监听 0.0.0.0:5000
 
 本仓库为本科毕业设计原型代码，处于可复现演示的水平而非产品化状态：包名 `com.example.testppppp`、部分阈值与界面文案仍保留开发期形态。
 
-完整的算法推导、参数取值依据与实验分析见毕业设计论文《基于声学感知的桌面交互系统设计与实现》（2026），脱敏版 PDF 见仓库 [Releases](https://github.com/ChangAkira/knockknock/releases)。
+完整的算法推导、参数取值依据与实验分析见毕业设计论文《基于声学感知的桌面交互系统设计与实现》（2026），[脱敏版 PDF](https://github.com/ChangAkira/knockknock/releases/tag/paper)。
